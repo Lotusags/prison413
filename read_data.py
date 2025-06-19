@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Sequence, ClassVar
 import json
 import time
 import re
@@ -21,11 +21,12 @@ class Crew(object):
 
 @dataclass
 class Event(object):
-    ground_id: int
+    base_id: int
     source: str
     destination: str
     st: datetime.datetime
     et: datetime.datetime
+    id_prefix: ClassVar[str] = "Event_"
 
     def __lt__(self, other):
         if self.st == other.st:
@@ -38,19 +39,19 @@ class Flight(Event):
     fleet: str
     aircraftNo: str
     flyTime: int
-    id_prefix: str = "Flt_"
+    id_prefix: ClassVar[str] = "Flt_"
 
 
 @dataclass
 class GroundDuty(Event):
     crew_id: int
     is_duty: int
-    id_prefix: str = "grd_"
+    id_prefix: ClassVar[str] = "grd_"
 
 
 @dataclass
 class BusTravel(Event):
-    id_prefix: str = "ddh_"
+    id_prefix: ClassVar[str] = "ddh_"
 
 
 flight_id_2_flight: Dict[int, Flight] = {}
@@ -64,8 +65,8 @@ bus_id_2_bus: Dict[int, BusTravel] = {}
 # read data code, but commented out to avoid running it if unnecessary
 flight_data = pd.read_csv("data/flight.csv")
 for index, row in flight_data.iterrows():
-    ground_id = row['id']
-    ground_id = int(ground_id.split("_")[1])
+    base_id = row['id']
+    base_id = int(base_id.split("_")[1])
     source = row['depaAirport']
     destination = row['arriAirport']
     st = pd.to_datetime(row['std'])
@@ -73,25 +74,25 @@ for index, row in flight_data.iterrows():
     fleet = row['fleet']
     aircraftNo = row['aircraftNo']
     flyTime = row['flyTime']
-    flight_obj = Flight(ground_id, source, destination, st, et, fleet, aircraftNo, flyTime)
-    flight_id_2_flight[ground_id] = flight_obj
+    flight_obj = Flight(base_id, source, destination, st, et, fleet, aircraftNo, flyTime)
+    flight_id_2_flight[base_id] = flight_obj
 crew_data = pd.read_csv("data/crew.csv")
-# crew_match_data = pd.read_csv("data/crewLegMatch.csv")
-# print(crew_match_data.size)
-# for index, row in crew_match_data.iterrows():
-#     crew_id = int(row['crewId'].split("_")[1])
-#     ground_id = int(row['legId'].split("_")[1])
-#     if ground_id not in flight_id_2_flight:
-#         print(ground_id, " not in flight_id_2_flight")
-#     crew_2_matched_flights[crew_id].add(ground_id)
-#     flight_2_matched_crews[ground_id].add(crew_id)
+crew_match_data = pd.read_csv("data/crewLegMatch.csv")
+print(crew_match_data.size)
+for index, row in crew_match_data.iterrows():
+    crew_id = int(row['crewId'].split("_")[1])
+    ground_id = int(row['legId'].split("_")[1])
+    if ground_id not in flight_id_2_flight:
+        print(ground_id, " not in flight_id_2_flight")
+    crew_2_matched_flights[crew_id].add(ground_id)
+    flight_2_matched_crews[ground_id].add(crew_id)
 for index, row in crew_data.iterrows():
     crew_id = int(row['crewId'].split("_")[1])
     base = row['base']
     stay_station = row['stayStation']
     crew_obj = Crew(base, stay_station, crew_id)
-    # if crew_id not in crew_2_matched_flights:
-    #     print(crew_id, " not in crew_2_matched_flights")
+    if crew_id not in crew_2_matched_flights:
+        print(crew_id, " not in crew_2_matched_flights")
     # crew_obj.eligible_flights = crew_2_matched_flights[crew_id]
     crew_id_2_crew[crew_id] = crew_obj
 layover_data = pd.read_csv("data/layoverStation.csv")
@@ -99,15 +100,15 @@ for index, row in layover_data.iterrows():
     layover_bases.add(row['airport'])
 ground_data = pd.read_csv("data/groundDuty.csv")
 for index, row in ground_data.iterrows():
-    ground_id = int(row['id'].split("_")[1])
+    base_id = int(row['id'].split("_")[1])
     source = row['airport']
     destination = row['airport']
     st = pd.to_datetime(row['startTime'])
     et = pd.to_datetime(row['endTime'])
     crew_id = int(row['crewId'].split("_")[1])
     is_duty = int(row['isDuty'])
-    ground_obj = GroundDuty(ground_id, source, destination, st, et, crew_id, is_duty)
-    ground_id_2_ground[ground_id] = ground_obj
+    ground_obj = GroundDuty(base_id, source, destination, st, et, crew_id, is_duty)
+    ground_id_2_ground[base_id] = ground_obj
 # print(ground_id_2_ground)
 # print(len(ground_id_2_ground))
 bus_data = pd.read_csv("data/busInfo.csv")
@@ -140,11 +141,11 @@ start_time_order_event_list.sort(key=lambda x: (x.st, x.et))
 start_time_order_flight_list.sort(key=lambda x: (x.st, x.et))
 start_time_order_bus_list.sort(key=lambda x: (x.st, x.et))
 start_time_order_ground_list.sort(key=lambda x: (x.st, x.et))
-print(start_time_order_event_list)
+# print(start_time_order_event_list)
 
 
 def get_time_range_events(start_time: datetime.datetime, end_time: datetime.datetime, event_type: str = "event") -> \
-        List[Event]:
+        Sequence[Event]:
     """
     Get all events within the specified time range.
     """

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 import matplotlib
-matplotlib.use('TkAgg')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
@@ -162,4 +162,5 @@ cbar_edges.set_label('Flights on Route')
 ax.set_title('Directed Flight Network with Curved Edges')
 ax.axis('off')
 plt.tight_layout()
-plt.show()
+fig.savefig('flight_network.png', dpi=300, bbox_inches='tight')
+# plt.show()
