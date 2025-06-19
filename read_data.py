@@ -76,15 +76,15 @@ for index, row in flight_data.iterrows():
     flight_obj = Flight(ground_id, source, destination, st, et, fleet, aircraftNo, flyTime)
     flight_id_2_flight[ground_id] = flight_obj
 crew_data = pd.read_csv("data/crew.csv")
-# crew_match_data = pd.read_csv("data/crewLegMatch.csv")
-# print(crew_match_data.size)
-# for index, row in crew_match_data.iterrows():
-#     crew_id = int(row['crewId'].split("_")[1])
-#     ground_id = int(row['legId'].split("_")[1])
-#     if ground_id not in flight_id_2_flight:
-#         print(ground_id, " not in flight_id_2_flight")
-#     crew_2_matched_flights[crew_id].add(ground_id)
-#     flight_2_matched_crews[ground_id].add(crew_id)
+crew_match_data = pd.read_csv("data/crewLegMatch.csv")
+print(crew_match_data.size)
+for index, row in crew_match_data.iterrows():
+    crew_id = int(row['crewId'].split("_")[1])
+    ground_id = int(row['legId'].split("_")[1])
+    if ground_id not in flight_id_2_flight:
+        print(ground_id, " not in flight_id_2_flight")
+    crew_2_matched_flights[crew_id].add(ground_id)
+    flight_2_matched_crews[ground_id].add(crew_id)
 for index, row in crew_data.iterrows():
     crew_id = int(row['crewId'].split("_")[1])
     base = row['base']
