@@ -1,4 +1,8 @@
 from gurobipy import *
+from typing import Set, Dict, Tuple
+
+
+
 
 class crew_schedule_generator:
     def __init__(self, params):

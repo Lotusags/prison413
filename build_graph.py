@@ -8,6 +8,8 @@ WAITING_TIME_LIMIT = 12 * 60 * 60  # 12 hours in seconds
 DUTY_DAY_GAP = 12 * 60 * 60
 WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT = 3 * 60 * 60  # 3 hours in seconds
 WAITING_TIME_BETWEENT_BUS_AND_FLIGHT = 2 * 60 * 60  # 2 hours in seconds
+CYCLE_DAY_GAP = 2
+CYCLE_WAIT_DAY_MAX_GAP = 4
 
 class EdgeType(Enum):
     EDGE_IN_SAME_DUTY_DAY = 0
@@ -30,10 +32,11 @@ class Node(object):
         self.et: datetime.datetime = event.et
         # day num from epoch (January 1, 1970)
         self.start_day: int = event.st.toordinal()
+        self.end_day: int = event.et.toordinal()
         self.can_layover: bool = self.destination in layover_bases
 
     def __repr__(self):
-        return f"Node({self.event.id_prefix}{self.event.base_id})"
+        return f"Node({self.event.base_id})"
     
 
 class Edge(object):
@@ -42,10 +45,10 @@ class Edge(object):
         self.source_node = source_node
         self.destination_node = destination_node
         self.type: EdgeType = edge_type
-        self.passby_event: Event
+        self.passby_event: List[Event] = []
 
     def __repr__(self):
-        return f"Edge({self.source_node.event.id_prefix}{self.source_node.event.base_id} -> {self.destination_node.event.id_prefix}{self.destination_node.event.base_id}, type={self.type})"
+        return f"Edge({self.source_node.event.base_id} -> {self.destination_node.event.base_id}, type={self.type})"
 
 
 flight_node_id_2_node: Dict[str, Node] = {}
@@ -118,6 +121,7 @@ def build_edge_to_next_duty_day():
                         break
 
     def build_edge_with_deadhead():
+        all_build_num = 0
         """
         source_node.destination != destination_node.source, so we need to deadhead
         如果是结束执勤日的置位，仅允许在可过夜机场，且结束置位时间与开始置位时间间隔大于等于12小时
@@ -130,19 +134,18 @@ def build_edge_to_next_duty_day():
                 source_node = node_id_2_node[source_node_id]
                 et = source_node.et
                 # 1.1 考虑大巴置位
-                if destination in bus_destination_2_node_ids:
-                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), key=lambda x: bus_id_2_bus[int(x.split("_")[1])].st)
+                if destination in bus_source_2_node_ids:
+                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), key=lambda x: bus_id_2_bus[x].st)
                     for bus_id in bus_source_2_node_ids[destination][idx:]:
-                        bus_id = int(bus_id.split("_")[1])
                         bus = bus_id_2_bus[bus_id]
                         if bus.destination not in layover_bases:
                             continue
                         if (bus.st - source_node.et).total_seconds() > WAITING_TIME_BETWEENT_BUS_AND_FLIGHT + WAITING_TIME_LIMIT:
                             break
                         if time_arrived_nxt_airport[bus.destination][0] > bus.et:
-                            time_arrived_nxt_airport[bus.destination] = (bus.et, bus.id_prefix + str(bus.base_id))
+                            time_arrived_nxt_airport[bus.destination] = (bus.et, bus_id)
                 # 1.2 考虑航班置位
-                if destination in flight_destination_2_node_ids:
+                if destination in flight_source_2_node_ids:
                     idx = bisect.bisect_left(flight_source_2_node_ids[destination], et, key=lambda x: node_id_2_node[x].st)
                     for flight_id in flight_source_2_node_ids[destination][idx:]:
                         flight = node_id_2_node[flight_id]
@@ -156,22 +159,30 @@ def build_edge_to_next_duty_day():
                         elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT:
                             break
                 # 1.3 从新到达的位置开始检查，是否有可以创建的边
+                print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
+                cnt = 0
                 for new_airport, time_arrived in time_arrived_nxt_airport.items():
                     if new_airport not in event_source_2_node_ids:
                         continue
                     idx = bisect.bisect_left(event_source_2_node_ids[new_airport], time_arrived[0] + datetime.timedelta(seconds=DUTY_DAY_GAP), key=lambda x: node_id_2_node[x].st)
-                    for destination_node_id in event_source_2_node_ids[destination][idx:]:
+                    # tmp_idx = bisect.bisect_left(event_source_2_node_ids[new_airport], time_arrived[0] + datetime.timedelta(seconds=DUTY_DAY_GAP + WAITING_TIME_LIMIT), key=lambda x: node_id_2_node[x].st)
+                    # print("----------- idx: " + str(idx) + ", tmp_idx: " + str(tmp_idx))
+                    for destination_node_id in event_source_2_node_ids[new_airport][idx:]:
                         destination_node = node_id_2_node[destination_node_id]
                         if WAITING_TIME_LIMIT + DUTY_DAY_GAP >= (destination_node.st - time_arrived[0]).total_seconds():
                             edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
                             edge = Edge(source_node, destination_node, edge_type)
-                            base_id = int(time_arrived[1].split("_")[1])
-                            prefix = time_arrived[1].split("_")[0]
-                            edge.passby_event = flight_id_2_flight[base_id] if prefix == "Flt" else bus_id_2_bus[base_id]
+                            event_id = time_arrived[1]
+                            prefix = event_id.split("_")[0]
+                            tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
+                            edge.passby_event.append(tmp)
                             source_node.out_edges.append(edge)
                             destination_node.in_edges.append(edge)
+                            cnt += 1
                         else:
                             break
+                print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in prev day")
+                all_build_num += cnt
             # 2. 考虑后一执勤日开始时置位
             for source_node_id in node_ids:
                 source_node = node_id_2_node[source_node_id]
@@ -182,46 +193,45 @@ def build_edge_to_next_duty_day():
                 new_airport_set: Set[str] = set()
                 et = source_node.et
                 # 2.1 考虑大巴置位
-                if destination in bus_destination_2_node_ids:
-                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=DUTY_DAY_GAP), key=lambda x: bus_id_2_bus[int(x.split("_")[1])].st)
+                if destination in bus_source_2_node_ids:
+                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=DUTY_DAY_GAP), key=lambda x: bus_id_2_bus[x].st)
                     for bus_id in bus_source_2_node_ids[destination][idx:]:
-                        bus_id = int(bus_id.split("_")[1])
                         bus = bus_id_2_bus[bus_id]
                         if (bus.st - source_node.et).total_seconds() > DUTY_DAY_GAP + WAITING_TIME_LIMIT:
                             break
                         new_airport_set.add(bus.destination)
                         if time_arrived_nxt_airport_by_bus[bus.destination][0] > bus.et:
-                            time_arrived_nxt_airport_by_bus[bus.destination] = (bus.et, bus.id_prefix + str(bus.base_id))
+                            time_arrived_nxt_airport_by_bus[bus.destination] = (bus.et, bus_id)
                 # 2.2 考虑航班置位
-                if destination in flight_destination_2_node_ids:
+                if destination in flight_source_2_node_ids:
                     idx = bisect.bisect_left(flight_source_2_node_ids[destination], et + datetime.timedelta(seconds=DUTY_DAY_GAP), key=lambda x: node_id_2_node[x].st)
                     for flight_id in flight_source_2_node_ids[destination][idx:]:
                         flight = node_id_2_node[flight_id]
                         if not isinstance(flight.event, Flight):
                             continue
                         aircraft = flight.event.aircraftNo
-                        if flight.destination not in layover_bases:
-                            continue
                         if WAITING_TIME_LIMIT + DUTY_DAY_GAP >= (flight.st - source_node.et).total_seconds():
                             new_airport_set.add(flight.destination)
                             if time_arrived_nxt_airport_by_flight[flight.destination][aircraft][0] > flight.et:
                                 time_arrived_nxt_airport_by_flight[flight.destination][aircraft] = (flight.et, flight_id)
                         elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT + DUTY_DAY_GAP:
                             break
+                print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
                 # 2.3 更新到达每个机场的几个时间指标，优化时间复杂度
                 # 这个字典是所有passby方式到达，假设都需要等待才能开始下阶段任务的最小时间
                 # 具体使用需要再去查同飞机型号的是否存在，存在则不罚时取min
+                cnt = 0
                 really_can_start_time_map: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
-                min_time_arrived_map: Dict[str, datetime.datetime] = defaultdict(lambda: datetime.datetime.max)
+                min_time_arrived_map: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
                 for new_airport in new_airport_set:
-                    min_time_arrived = datetime.datetime.max
+                    min_time_arrived = (datetime.datetime.max, "")
                     if new_airport in time_arrived_nxt_airport_by_bus:
-                        min_time_arrived = min(min_time_arrived, time_arrived_nxt_airport_by_bus[new_airport][0])
+                        min_time_arrived = min(min_time_arrived, time_arrived_nxt_airport_by_bus[new_airport])
                         if really_can_start_time_map[new_airport][0] > time_arrived_nxt_airport_by_bus[new_airport][0] + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT):
                             really_can_start_time_map[new_airport] = (time_arrived_nxt_airport_by_bus[new_airport][0] + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), time_arrived_nxt_airport_by_bus[new_airport][1])
                     if new_airport in time_arrived_nxt_airport_by_flight:
                         for aircraft, time_arrived_by_aircraft in time_arrived_nxt_airport_by_flight[new_airport].items():
-                            min_time_arrived = min(min_time_arrived, time_arrived_by_aircraft[0])
+                            min_time_arrived = min(min_time_arrived, time_arrived_by_aircraft)
                             if really_can_start_time_map[new_airport][0] > time_arrived_by_aircraft[0] + datetime.timedelta(seconds=WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT):
                                 really_can_start_time_map[new_airport] = (time_arrived_by_aircraft[0] + datetime.timedelta(seconds=WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT), time_arrived_by_aircraft[1])
                     min_time_arrived_map[new_airport] = min_time_arrived
@@ -229,41 +239,230 @@ def build_edge_to_next_duty_day():
                 for new_airport, time_arrived in min_time_arrived_map.items():
                     if new_airport not in event_source_2_node_ids:
                         continue
-                    idx = bisect.bisect_left(event_source_2_node_ids[new_airport], time_arrived, key=lambda x: node_id_2_node[x].st)
-                    for destination_node_id in event_source_2_node_ids[destination][idx:]:
+                    idx = bisect.bisect_left(event_source_2_node_ids[new_airport], time_arrived[0], key=lambda x: node_id_2_node[x].st)
+                    for destination_node_id in event_source_2_node_ids[new_airport][idx:]:
                         destination_node = node_id_2_node[destination_node_id]
-                        if not isinstance(destination_node.event, Flight):
-                            continue
-                        nxt_aircraft = destination_node.event.aircraftNo
                         really_can_start_time = really_can_start_time_map[new_airport][0]
                         passby_event = really_can_start_time_map[new_airport][1]
-                        if really_can_start_time > time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]:
-                            really_can_start_time = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]
-                            passby_event = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][1]
+                        if isinstance(destination_node.event, Flight):
+                            nxt_aircraft = destination_node.event.aircraftNo
+                        
+                            if really_can_start_time > time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]:
+                                really_can_start_time = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]
+                                passby_event = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][1]
+                        else:
+                            really_can_start_time = time_arrived[0]
+                            passby_event = time_arrived[1]
                         if destination_node.st < really_can_start_time:
                             continue
                         if destination_node.st > really_can_start_time + datetime.timedelta(seconds=WAITING_TIME_LIMIT):
                             break
                         edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
                         edge = Edge(source_node, destination_node, edge_type)
-                        base_id = int(passby_event.split("_")[1])
+                        event_id = passby_event
                         prefix = passby_event.split("_")[0]
-                        edge.passby_event = flight_id_2_flight[base_id] if prefix == "Flt" else bus_id_2_bus[base_id]
+                        tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
+                        edge.passby_event.append(tmp)
                         source_node.out_edges.append(edge)
                         destination_node.in_edges.append(edge)
+                        cnt += 1
                         # print(f"Build edge {edge} with passby event {edge.passby_event}")
+                print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in next day")
+                all_build_num += cnt
+        print(f"Total {all_build_num} edges built with deadhead in next duty day")
                         
     build_edge_no_over_day_in_same_airport()
     build_edge_with_deadhead()
 
     
+def build_edge_to_next_cycle():
+    def build_edge_in_same_base():
+        """
+        source_node.destination == destination_node.source && edge.destination_node.event.start_day - edge.source_node.et.event.end_day >= 2
+        """
+        for destination, node_ids in event_destination_2_node_ids.items():
+            if destination not in crew_possible_bases:
+                continue
+            if destination not in event_source_2_node_ids:
+                continue
+            for source_node_id in node_ids:
+                source_node = node_id_2_node[source_node_id]
+                ed = source_node.end_day
+                # use bisect to find the first node that starts after st
+                idx = bisect.bisect_left(event_source_2_node_ids[destination], ed + CYCLE_DAY_GAP, key=lambda x: node_id_2_node[x].start_day)
+                # Iterate through all nodes starting after st
+                for destination_node_id in event_source_2_node_ids[destination][idx:]:
+                    destination_node = node_id_2_node[destination_node_id]
+                    if CYCLE_WAIT_DAY_MAX_GAP >= destination_node.start_day - source_node.end_day:
+                        edge_type = EdgeType.EDGE_OVER_FLIGHT_CYCLE
+                        edge = Edge(source_node, destination_node, edge_type)
+                        source_node.out_edges.append(edge)
+                        destination_node.in_edges.append(edge)
+                    else:
+                        break
+        
+
+    def build_edge_with_deadhead():
+        """
+        起点在基地 -> 终点不在基地，需置位
+        起点不在基地 -> 终点在基地
+        起点不在基地 -> 终点不在基地，需2次置位
+        """
+        all_build_num = 0
+        for destination, node_ids in event_destination_2_node_ids.items():
+            # 1. 考虑前一执勤日结束时进行置位
+            for source_node_id in node_ids:
+                time_arrived_nxt_airport: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
+                source_node = node_id_2_node[source_node_id]
+                et = source_node.et
+                # 1.1 考虑大巴置位
+                if destination in bus_source_2_node_ids:
+                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), key=lambda x: bus_id_2_bus[x].st)
+                    for bus_id in bus_source_2_node_ids[destination][idx:]:
+                        bus = bus_id_2_bus[bus_id]
+                        if bus.destination not in crew_possible_bases:
+                            continue
+                        if (bus.st - source_node.et).total_seconds() > WAITING_TIME_BETWEENT_BUS_AND_FLIGHT + WAITING_TIME_LIMIT:
+                            break
+                        if time_arrived_nxt_airport[bus.destination][0] > bus.et:
+                            time_arrived_nxt_airport[bus.destination] = (bus.et, bus_id)
+                # 1.2 考虑航班置位
+                if destination in flight_source_2_node_ids:
+                    idx = bisect.bisect_left(flight_source_2_node_ids[destination], et, key=lambda x: node_id_2_node[x].st)
+                    for flight_id in flight_source_2_node_ids[destination][idx:]:
+                        flight = node_id_2_node[flight_id]
+                        if flight.destination not in crew_possible_bases:
+                            continue
+                        # if both is flight node, need to check if aircraftNo is same
+                        time_need_to_wait = WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT if not check_is_the_same_aircraft(source_node, flight) else 0  
+                        if WAITING_TIME_LIMIT >= (flight.st - source_node.et).total_seconds() >= time_need_to_wait:
+                            if time_arrived_nxt_airport[flight.destination][0] > flight.et:
+                                time_arrived_nxt_airport[flight.destination] = (flight.et, flight_id)
+                        elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT:
+                            break
+                print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
+                # 1.3 从新到达的位置开始检查，是否有可以创建的边
+                cnt = 0
+                for new_airport, time_arrived in time_arrived_nxt_airport.items():
+                    if new_airport not in event_source_2_node_ids:
+                        continue
+                    ed = time_arrived[0].toordinal()
+                    idx = bisect.bisect_left(event_source_2_node_ids[new_airport], ed + CYCLE_DAY_GAP, key=lambda x: node_id_2_node[x].start_day)
+                    for destination_node_id in event_source_2_node_ids[new_airport][idx:]:
+                        destination_node = node_id_2_node[destination_node_id]
+                        if CYCLE_WAIT_DAY_MAX_GAP >= destination_node.start_day - ed:
+                            edge_type = EdgeType.EDGE_OVER_FLIGHT_CYCLE
+                            edge = Edge(source_node, destination_node, edge_type)
+                            event_id = time_arrived[1]
+                            prefix = event_id.split("_")[0]
+                            tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
+                            edge.passby_event.append(tmp)
+                            source_node.out_edges.append(edge)
+                            destination_node.in_edges.append(edge)
+                            cnt += 1
+                        else:
+                            break
+                print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in prev day")
+                all_build_num += cnt
+            # 2. 考虑后一执勤日开始时置位
+            for source_node_id in node_ids:
+                source_node = node_id_2_node[source_node_id]
+                if source_node.destination not in crew_possible_bases:
+                    continue
+                time_arrived_nxt_airport_by_bus: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
+                time_arrived_nxt_airport_by_flight: Dict[str, Dict[str, Tuple[datetime.datetime, str]]] = defaultdict(lambda: defaultdict(lambda: (datetime.datetime.max, "")))
+                new_airport_set: Set[str] = set()
+                ed = source_node.end_day
+                # 2.1 考虑大巴置位
+                if destination in bus_source_2_node_ids:
+                    idx = bisect.bisect_left(bus_source_2_node_ids[destination], ed + CYCLE_DAY_GAP, key=lambda x: bus_id_2_bus[x].st.toordinal())
+                    for bus_id in bus_source_2_node_ids[destination][idx:]:
+                        bus = bus_id_2_bus[bus_id]
+                        if (bus.st.toordinal() - source_node.end_day) > CYCLE_WAIT_DAY_MAX_GAP:
+                            break
+                        new_airport_set.add(bus.destination)
+                        if time_arrived_nxt_airport_by_bus[bus.destination][0] > bus.et:
+                            time_arrived_nxt_airport_by_bus[bus.destination] = (bus.et, bus_id)
+                # 2.2 考虑航班置位
+                if destination in flight_source_2_node_ids:
+                    idx = bisect.bisect_left(flight_source_2_node_ids[destination], ed + CYCLE_DAY_GAP, key=lambda x: node_id_2_node[x].start_day)
+                    for flight_id in flight_source_2_node_ids[destination][idx:]:
+                        flight = node_id_2_node[flight_id]
+                        if not isinstance(flight.event, Flight):
+                            continue
+                        aircraft = flight.event.aircraftNo
+                        if CYCLE_WAIT_DAY_MAX_GAP >= (flight.start_day - ed):
+                            new_airport_set.add(flight.destination)
+                            if time_arrived_nxt_airport_by_flight[flight.destination][aircraft][0] > flight.et:
+                                time_arrived_nxt_airport_by_flight[flight.destination][aircraft] = (flight.et, flight_id)
+                        else:
+                            break
+                print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
+                cnt = 0
+                # 2.3 更新到达每个机场的几个时间指标，优化时间复杂度
+                # 这个字典是所有passby方式到达，假设都需要等待才能开始下阶段任务的最小时间
+                # 具体使用需要再去查同飞机型号的是否存在，存在则不罚时取min
+                really_can_start_time_map: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
+                min_time_arrived_map: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
+                for new_airport in new_airport_set:
+                    min_time_arrived = (datetime.datetime.max, "")
+                    if new_airport in time_arrived_nxt_airport_by_bus:
+                        min_time_arrived = min(min_time_arrived, time_arrived_nxt_airport_by_bus[new_airport])
+                        if really_can_start_time_map[new_airport][0] > time_arrived_nxt_airport_by_bus[new_airport][0] + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT):
+                            really_can_start_time_map[new_airport] = (time_arrived_nxt_airport_by_bus[new_airport][0] + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), time_arrived_nxt_airport_by_bus[new_airport][1])
+                    if new_airport in time_arrived_nxt_airport_by_flight:
+                        for aircraft, time_arrived_by_aircraft in time_arrived_nxt_airport_by_flight[new_airport].items():
+                            min_time_arrived = min(min_time_arrived, time_arrived_by_aircraft)
+                            if really_can_start_time_map[new_airport][0] > time_arrived_by_aircraft[0] + datetime.timedelta(seconds=WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT):
+                                really_can_start_time_map[new_airport] = (time_arrived_by_aircraft[0] + datetime.timedelta(seconds=WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT), time_arrived_by_aircraft[1])
+                    min_time_arrived_map[new_airport] = min_time_arrived
+                # 2.4 对每个新机场，找到可以创建的边
+                for new_airport, time_arrived in min_time_arrived_map.items():
+                    if new_airport not in event_source_2_node_ids:
+                        continue
+                    idx = bisect.bisect_left(event_source_2_node_ids[new_airport], time_arrived[0], key=lambda x: node_id_2_node[x].st)
+                    for destination_node_id in event_source_2_node_ids[new_airport][idx:]:
+                        destination_node = node_id_2_node[destination_node_id]
+                        really_can_start_time = really_can_start_time_map[new_airport][0]
+                        passby_event = really_can_start_time_map[new_airport][1]
+                        if isinstance(destination_node.event, Flight):
+                            nxt_aircraft = destination_node.event.aircraftNo
+                        
+                            if really_can_start_time > time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]:
+                                really_can_start_time = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][0]
+                                passby_event = time_arrived_nxt_airport_by_flight[new_airport][nxt_aircraft][1]
+                        else:
+                            really_can_start_time = time_arrived[0]
+                            passby_event = time_arrived[1]
+                        if destination_node.st < really_can_start_time:
+                            continue
+                        if destination_node.st > really_can_start_time + datetime.timedelta(seconds=WAITING_TIME_LIMIT):
+                            break
+                        edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
+                        edge = Edge(source_node, destination_node, edge_type)
+                        event_id = passby_event
+                        prefix = passby_event.split("_")[0]
+                        tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
+                        edge.passby_event.append(tmp)
+                        source_node.out_edges.append(edge)
+                        destination_node.in_edges.append(edge)
+                        cnt += 1
+                        # print(f"Build edge {edge} with passby event {edge.passby_event}")
+                print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in next day")
+                all_build_num += cnt
+        print(f"Total {all_build_num} edges built with deadhead in next cycle")
+                        
+    build_edge_in_same_base()
+    build_edge_with_deadhead()
+
+
 def build_event_graph(
     flights: List[Flight],
     grounds: List[GroundDuty]
 ):
     # 1. build nodes
     for flight in flights:
-        node_id = f"{flight.id_prefix}{flight.base_id}"
+        node_id = flight.base_id
         flight_node_id_2_node[node_id] = Node(flight)
         node_id_2_node[node_id] = flight_node_id_2_node[node_id]
         event_destination_2_node_ids[flight.destination].append(node_id)
@@ -271,7 +470,7 @@ def build_event_graph(
         flight_destination_2_node_ids[flight.destination].append(node_id)
         flight_source_2_node_ids[flight.source].append(node_id)
     for ground in grounds:
-        node_id = f"{ground.id_prefix}{ground.base_id}"
+        node_id = ground.base_id
         ground_duty_node_id_2_node[node_id] = Node(ground)
         node_id_2_node[node_id] = ground_duty_node_id_2_node[node_id]
         event_destination_2_node_ids[ground.destination].append(node_id)
@@ -281,13 +480,13 @@ def build_event_graph(
     for source, lst in event_source_2_node_ids.items():
         lst.sort(key=lambda x: node_id_2_node[x].st)
     for bus in bus_id_2_bus.values():
-        node_id = f"{bus.id_prefix}{bus.base_id}"
+        node_id = bus.base_id
         bus_source_2_node_ids[bus.source].append(node_id)
         bus_destination_2_node_ids[bus.destination].append(node_id)
     for des, lst in bus_destination_2_node_ids.items():
-        lst.sort(key=lambda x: bus_id_2_bus[int(x.split("_")[1])].et)
+        lst.sort(key=lambda x: bus_id_2_bus[x].et)
     for source, lst in bus_source_2_node_ids.items():
-        lst.sort(key=lambda x: bus_id_2_bus[int(x.split("_")[1])].st)
+        lst.sort(key=lambda x: bus_id_2_bus[x].st)
     for des, lst in flight_destination_2_node_ids.items():
         lst.sort(key=lambda x: node_id_2_node[x].et)
     for source, lst in flight_source_2_node_ids.items():
@@ -298,6 +497,8 @@ def build_event_graph(
     build_edge_in_the_same_duty_day()
     # 2.2 try to find EDGE_TO_NEXT_DUTY_DAY
     build_edge_to_next_duty_day()
+    # 2.3 try to find EDGE_OVER_FLIGHT_CYCLE
+    build_edge_to_next_cycle()
     # todo build illegal edges, which are edges that are not allowed by the rules
     return
 
