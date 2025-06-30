@@ -34,7 +34,7 @@ class Params:
         self.all_out: Dict[str, Set[str]] = {}
         self.max_flight_num: int = 5
         self.max_tot_duty_num: int = 10
-        self.flight_time: Dict[str, float] = {flight_id: flight.flyTime for flight_id, flight in flight_id_2_flight.items()}
+        self.flight_time: Dict[str, float] = {flight_id: flight.fly_time for flight_id, flight in flight_id_2_flight.items()}
         self.max_flight_time_within_duty_day: float = 8.0
         self.rest_out: Dict[str, Set[str]] = {}
         self.Rest_out: Dict[str, Set[str]] = {}

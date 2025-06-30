@@ -10,6 +10,9 @@ import pandas as pd
 import bisect
 
 
+data_file = "data/"
+
+
 @dataclass
 class Crew(object):
     base: str
@@ -38,13 +41,14 @@ class Event(object):
 class Flight(Event):
     fleet: str
     aircraftNo: str
-    flyTime: int
+    # 分钟
+    fly_time: int
     id_prefix: ClassVar[str] = "Flt_"
 
 
 @dataclass
 class GroundDuty(Event):
-    crew_id: int
+    crew_id: str
     is_duty: int
     id_prefix: ClassVar[str] = "grd_"
 
@@ -66,7 +70,7 @@ bus_id_2_bus: Dict[str, BusTravel] = {}
 crew_possible_bases: Set[str] = set()
 
 # read data code, but commented out to avoid running it if unnecessary
-flight_data = pd.read_csv("data/flight.csv")
+flight_data = pd.read_csv(data_file + "flight.csv")
 for index, row in flight_data.iterrows():
     base_id = row['id']
     # base_id = int(base_id.split("_")[1])
@@ -79,8 +83,8 @@ for index, row in flight_data.iterrows():
     flyTime = row['flyTime']
     flight_obj = Flight(base_id, source, destination, st, et, fleet, aircraftNo, flyTime)
     flight_id_2_flight[base_id] = flight_obj
-crew_data = pd.read_csv("data/crew.csv")
-# crew_match_data = pd.read_csv("data/crewLegMatch.csv")
+crew_data = pd.read_csv(data_file + "crew.csv")
+# crew_match_data = pd.read_csv(data_file + "crewLegMatch.csv")
 # print(crew_match_data.size)
 # for index, row in crew_match_data.iterrows():
 #     crew_id = int(row['crewId'].split("_")[1])
@@ -101,10 +105,10 @@ for index, row in crew_data.iterrows():
     crew_id_2_crew[crew_id] = crew_obj
     crew_possible_bases.add(base)
     # crew_obj.id_prefix = row['crewId'].split("_")[0] + "_"
-layover_data = pd.read_csv("data/layoverStation.csv")
+layover_data = pd.read_csv(data_file + "layoverStation.csv")
 for index, row in layover_data.iterrows():
     layover_bases.add(row['airport'])
-ground_data = pd.read_csv("data/groundDuty.csv")
+ground_data = pd.read_csv(data_file + "groundDuty.csv")
 for index, row in ground_data.iterrows():
     # base_id = int(row['id'].split("_")[1])
     base_id = row['id']
@@ -119,7 +123,7 @@ for index, row in ground_data.iterrows():
     ground_id_2_ground[base_id] = ground_obj
 # print(ground_id_2_ground)
 # print(len(ground_id_2_ground))
-bus_data = pd.read_csv("data/busInfo.csv")
+bus_data = pd.read_csv(data_file + "busInfo.csv")
 for index, row in bus_data.iterrows():
     # bus_id = int(row['id'].split("_")[1])
     bus_id = row['id']
@@ -165,8 +169,8 @@ def get_time_range_events(start_time: datetime.datetime, end_time: datetime.date
         rf = Flight("0", "", "", end_time, end_time, "", "", 0)
     elif event_type == "ground":
         target = start_time_order_ground_list
-        lf = GroundDuty("0", "", "", start_time, start_time, 0, 0)
-        rf = GroundDuty("0", "", "", end_time, end_time, 0, 0)
+        lf = GroundDuty("0", "", "", start_time, start_time, "0", 0)
+        rf = GroundDuty("0", "", "", end_time, end_time, "0", 0)
     elif event_type == "bus":
         target = start_time_order_bus_list
         lf = BusTravel("0", "", "", start_time, start_time)
@@ -191,6 +195,8 @@ if __name__ == "__main__":
     for ground in ground_id_2_ground.values():
         if ground.is_duty == 1:
             onduty += 1
+        if ground.source != crew_id_2_crew[ground.crew_id].base:
+            print("ground " + ground.base_id + " 's crew is " + crew_id_2_crew[ground.crew_id].crew_id + " do ground in base")
     print("Total number of ground duties:", len(ground_id_2_ground))
     print("Total number of onduty ground duties:", onduty)
     for crew in crew_id_2_crew.values():

@@ -10,6 +10,10 @@ WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT = 3 * 60 * 60  # 3 hours in seconds
 WAITING_TIME_BETWEENT_BUS_AND_FLIGHT = 2 * 60 * 60  # 2 hours in seconds
 CYCLE_DAY_GAP = 2
 CYCLE_WAIT_DAY_MAX_GAP = 4
+LEGAL_DEADHEAD_COST = 0.5
+
+
+# todo passby event 的选择优化，现在是最早到达时间，但这个其实是不对的，应该是针对每个到达时刻的最晚起飞时间  线段树搞一下
 
 class EdgeType(Enum):
     EDGE_IN_SAME_DUTY_DAY = 0
@@ -30,10 +34,12 @@ class Node(object):
         self.destination: str = event.destination
         self.st: datetime.datetime = event.st
         self.et: datetime.datetime = event.et
+        self.fly_time: int = event.fly_time if isinstance(event, Flight) else 0
         # day num from epoch (January 1, 1970)
         self.start_day: int = event.st.toordinal()
         self.end_day: int = event.et.toordinal()
         self.can_layover: bool = self.destination in layover_bases
+        
 
     def __repr__(self):
         return f"Node({self.event.base_id})"
@@ -46,6 +52,12 @@ class Edge(object):
         self.destination_node = destination_node
         self.type: EdgeType = edge_type
         self.passby_event: List[Event] = []
+        self.time_cost: float = (destination_node.st - source_node.et).total_seconds()
+        self.day_cost: int = (destination_node.start_day - source_node.end_day)
+        self.penalty_of_illegal_layover: int = 0
+        # 这个要根据人来，搞不了
+        self.penalty_of_legal_layover: int = 0
+        self.penalty_of_deadhead: float = 0.0
 
     def __repr__(self):
         return f"Edge({self.source_node.event.base_id} -> {self.destination_node.event.base_id}, type={self.type})"
@@ -100,10 +112,12 @@ def build_edge_to_next_duty_day():
         source_node.destination == destination_node.source && edge.destination_node.st >= edge.source_node.et + DUTY_DAY_GAP
         """
         for destination, node_ids in event_destination_2_node_ids.items():
+            edge_type = None
             if destination not in event_source_2_node_ids:
                 continue
             if destination not in layover_bases:
-                continue
+                # 允许违禁  每一个新增机场扣一次分，感觉惩罚不是很重？
+                edge_type = EdgeType.EDGE_ILLEGAL
             for source_node_id in node_ids:
                 source_node = node_id_2_node[source_node_id]
                 et = source_node.et
@@ -113,7 +127,7 @@ def build_edge_to_next_duty_day():
                 for destination_node_id in event_source_2_node_ids[destination][idx:]:
                     destination_node = node_id_2_node[destination_node_id]
                     if WAITING_TIME_LIMIT + DUTY_DAY_GAP >= (destination_node.st - source_node.et).total_seconds():
-                        edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
+                        edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY if not edge_type else edge_type
                         edge = Edge(source_node, destination_node, edge_type)
                         source_node.out_edges.append(edge)
                         destination_node.in_edges.append(edge)
@@ -138,8 +152,8 @@ def build_edge_to_next_duty_day():
                     idx = bisect.bisect_left(bus_source_2_node_ids[destination], et + datetime.timedelta(seconds=WAITING_TIME_BETWEENT_BUS_AND_FLIGHT), key=lambda x: bus_id_2_bus[x].st)
                     for bus_id in bus_source_2_node_ids[destination][idx:]:
                         bus = bus_id_2_bus[bus_id]
-                        if bus.destination not in layover_bases:
-                            continue
+                        # if bus.destination not in layover_bases:
+                        #     continue
                         if (bus.st - source_node.et).total_seconds() > WAITING_TIME_BETWEENT_BUS_AND_FLIGHT + WAITING_TIME_LIMIT:
                             break
                         if time_arrived_nxt_airport[bus.destination][0] > bus.et:
@@ -149,8 +163,8 @@ def build_edge_to_next_duty_day():
                     idx = bisect.bisect_left(flight_source_2_node_ids[destination], et, key=lambda x: node_id_2_node[x].st)
                     for flight_id in flight_source_2_node_ids[destination][idx:]:
                         flight = node_id_2_node[flight_id]
-                        if flight.destination not in layover_bases:
-                            continue
+                        # if flight.destination not in layover_bases:
+                        #     continue
                         # if both is flight node, need to check if aircraftNo is same
                         time_need_to_wait = WAITING_TIME_BETWEEN_DIFFERENT_AIRCRAFT if not check_is_the_same_aircraft(source_node, flight) else 0  
                         if WAITING_TIME_LIMIT >= (flight.st - source_node.et).total_seconds() >= time_need_to_wait:
@@ -159,7 +173,7 @@ def build_edge_to_next_duty_day():
                         elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT:
                             break
                 # 1.3 从新到达的位置开始检查，是否有可以创建的边
-                print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
+                # print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
                 cnt = 0
                 for new_airport, time_arrived in time_arrived_nxt_airport.items():
                     if new_airport not in event_source_2_node_ids:
@@ -170,24 +184,29 @@ def build_edge_to_next_duty_day():
                     for destination_node_id in event_source_2_node_ids[new_airport][idx:]:
                         destination_node = node_id_2_node[destination_node_id]
                         if WAITING_TIME_LIMIT + DUTY_DAY_GAP >= (destination_node.st - time_arrived[0]).total_seconds():
-                            edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
+                            if new_airport in layover_bases:
+                                edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
+                            else:
+                                edge_type = EdgeType.EDGE_ILLEGAL
                             edge = Edge(source_node, destination_node, edge_type)
                             event_id = time_arrived[1]
                             prefix = event_id.split("_")[0]
                             tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
                             edge.passby_event.append(tmp)
+                            edge.penalty_of_deadhead = len(edge.passby_event) * LEGAL_DEADHEAD_COST
                             source_node.out_edges.append(edge)
                             destination_node.in_edges.append(edge)
                             cnt += 1
                         else:
                             break
-                print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in prev day")
+                # print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in prev day")
                 all_build_num += cnt
             # 2. 考虑后一执勤日开始时置位
             for source_node_id in node_ids:
                 source_node = node_id_2_node[source_node_id]
+                edge_type = None
                 if source_node.destination not in layover_bases:
-                    continue
+                    edge_type = EdgeType.EDGE_ILLEGAL
                 time_arrived_nxt_airport_by_bus: Dict[str, Tuple[datetime.datetime, str]] = defaultdict(lambda: (datetime.datetime.max, ""))
                 time_arrived_nxt_airport_by_flight: Dict[str, Dict[str, Tuple[datetime.datetime, str]]] = defaultdict(lambda: defaultdict(lambda: (datetime.datetime.max, "")))
                 new_airport_set: Set[str] = set()
@@ -216,7 +235,7 @@ def build_edge_to_next_duty_day():
                                 time_arrived_nxt_airport_by_flight[flight.destination][aircraft] = (flight.et, flight_id)
                         elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT + DUTY_DAY_GAP:
                             break
-                print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
+                # print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
                 # 2.3 更新到达每个机场的几个时间指标，优化时间复杂度
                 # 这个字典是所有passby方式到达，假设都需要等待才能开始下阶段任务的最小时间
                 # 具体使用需要再去查同飞机型号的是否存在，存在则不罚时取min
@@ -257,17 +276,18 @@ def build_edge_to_next_duty_day():
                             continue
                         if destination_node.st > really_can_start_time + datetime.timedelta(seconds=WAITING_TIME_LIMIT):
                             break
-                        edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY
+                        edge_type = EdgeType.EDGE_TO_NEXT_DUTY_DAY if edge_type is None else edge_type
                         edge = Edge(source_node, destination_node, edge_type)
                         event_id = passby_event
                         prefix = passby_event.split("_")[0]
                         tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
                         edge.passby_event.append(tmp)
+                        edge.penalty_of_deadhead = len(edge.passby_event) * LEGAL_DEADHEAD_COST
                         source_node.out_edges.append(edge)
                         destination_node.in_edges.append(edge)
                         cnt += 1
                         # print(f"Build edge {edge} with passby event {edge.passby_event}")
-                print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in next day")
+                # print(f"Build {cnt} edges from {source_node.event.base_id} to next duty day by passby in next day")
                 all_build_num += cnt
         print(f"Total {all_build_num} edges built with deadhead in next duty day")
                         
@@ -340,7 +360,7 @@ def build_edge_to_next_cycle():
                                 time_arrived_nxt_airport[flight.destination] = (flight.et, flight_id)
                         elif (flight.st - source_node.et).total_seconds() > WAITING_TIME_LIMIT:
                             break
-                print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
+                # print("source_node: " + source_node.event.base_id + " can go to " + str(len(time_arrived_nxt_airport)) + " airports by passby in prev day")
                 # 1.3 从新到达的位置开始检查，是否有可以创建的边
                 cnt = 0
                 for new_airport, time_arrived in time_arrived_nxt_airport.items():
@@ -357,12 +377,13 @@ def build_edge_to_next_cycle():
                             prefix = event_id.split("_")[0]
                             tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
                             edge.passby_event.append(tmp)
+                            edge.penalty_of_deadhead = len(edge.passby_event) * LEGAL_DEADHEAD_COST
                             source_node.out_edges.append(edge)
                             destination_node.in_edges.append(edge)
                             cnt += 1
                         else:
                             break
-                print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in prev day")
+                # print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in prev day")
                 all_build_num += cnt
             # 2. 考虑后一执勤日开始时置位
             for source_node_id in node_ids:
@@ -397,7 +418,7 @@ def build_edge_to_next_cycle():
                                 time_arrived_nxt_airport_by_flight[flight.destination][aircraft] = (flight.et, flight_id)
                         else:
                             break
-                print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
+                # print("source_node: " + source_node.event.base_id + " can go to " + str(len(new_airport_set)) + " airports by passby in next day")
                 cnt = 0
                 # 2.3 更新到达每个机场的几个时间指标，优化时间复杂度
                 # 这个字典是所有passby方式到达，假设都需要等待才能开始下阶段任务的最小时间
@@ -444,11 +465,12 @@ def build_edge_to_next_cycle():
                         prefix = passby_event.split("_")[0]
                         tmp = flight_id_2_flight[event_id] if prefix == "Flt" else bus_id_2_bus[event_id]
                         edge.passby_event.append(tmp)
+                        edge.penalty_of_deadhead = len(edge.passby_event) * LEGAL_DEADHEAD_COST
                         source_node.out_edges.append(edge)
                         destination_node.in_edges.append(edge)
                         cnt += 1
                         # print(f"Build edge {edge} with passby event {edge.passby_event}")
-                print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in next day")
+                # print(f"Build {cnt} edges from {source_node.event.base_id} to next cycle by passby in next day")
                 all_build_num += cnt
         print(f"Total {all_build_num} edges built with deadhead in next cycle")
                         
